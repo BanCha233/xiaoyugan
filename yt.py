@@ -274,16 +274,19 @@ PUL = ctypes.POINTER(ctypes.c_ulong)
 class MOUSEINPUT(ctypes.Structure):
     _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long), ("mouseData", ctypes.c_ulong),
                 ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong), ("dwExtraInfo", PUL)]
+
+class INPUT_I(ctypes.Union):
+    _fields_ = [("mi", MOUSEINPUT)]
+
 class INPUT(ctypes.Structure):
-    _fields_ = [("type", ctypes.c_ulong), ("ii", ctypes.Union)]
-    _anonymous_ = ("ii",)
+    _fields_ = [("type", ctypes.c_ulong), ("ii", INPUT_I)]
 
 SendInput = ctypes.windll.user32.SendInput
 
 def _send_mouse_event(flags, dx=0, dy=0, data=0):
     extra = ctypes.c_ulong(0)
     mi = MOUSEINPUT(dx, dy, data, flags, 0, ctypes.pointer(extra))
-    command = INPUT(type=0, mi=mi)
+    command = INPUT(type=0, ii=INPUT_I(mi=mi))
     SendInput(1, ctypes.byref(command), ctypes.sizeof(command))
 
 def left_down(): _send_mouse_event(0x0002)
