@@ -1,6 +1,6 @@
-# ==================== 猛兽派对钓鱼辅助（无音效无图片版） ====================
+# ==================== 猛兽派对钓鱼辅助（简洁UI版） ====================
 # 基于 IYIcode/hu-hu-fishing-demo 优化，遵循 MIT 协议
-# 移除音效、GUI图片，保留核心钓鱼功能
+# 移除音效、GUI图片，精简界面，修复咬钩误判
 
 import ctypes
 import time
@@ -23,7 +23,6 @@ import win32gui
 import win32con
 import win32api
 import tkinter as tk
-import tkinter.font as tkfont
 
 # -------------------- 日志配置 --------------------
 logging.basicConfig(
@@ -35,7 +34,6 @@ logger = logging.getLogger(__name__)
 
 # -------------------- 资源路径适配 --------------------
 def resource_path(relative_path: str) -> str:
-    """获取资源文件绝对路径（支持 PyInstaller 打包）"""
     try:
         base_path = sys._MEIPASS
     except Exception:
@@ -44,30 +42,28 @@ def resource_path(relative_path: str) -> str:
 
 # -------------------- 全局配置 --------------------
 class Config:
-    # 游戏窗口标题
     WINDOW_TITLES = ["猛兽派对", "Party Animals", "party animals"]
     
     # 数字变化检测区域 (相对坐标，绝对宽高)
     NUMBER_REGION = (0.873, 0.897, 19, 16)
-    NUMBER_SIMILARITY_THRESHOLD = 0.95
+    NUMBER_SIMILARITY_THRESHOLD = 0.90   # 降低阈值减少误判
     
-    # F 按钮区域 (用于鱼桶满检测)
+    # F 按钮区域 (鱼桶满检测)
     F_BUTTON_REGION = (0.4600, 0.9154, 0.0781, 0.0273)
     F_BUTTON_SIMILARITY_THRESHOLD = 0.85
     F_BUTTON_MIN_CONSECUTIVE = 2
     
-    # 抛竿成功颜色检测区域
+    # 抛竿成功颜色检测
     CAST_SUCCESS_REGION = (0.5645, 0.9193, 0.0049, 0.0065)
     CAST_SUCCESS_TARGET_BGR = np.array([41.6, 186.9, 249.6], dtype=np.float32)
     CAST_COLOR_TOLERANCE = 50.0
     
-    # 五角星品质检测区域
+    # 品质检测
     STAR_REGION = (0.40, 0.05, 0.20, 0.15)
     STAR_TEMPLATE = "star_template.png"
     COLOR_REGION_OFFSET_X = -45
     COLOR_REGION_WIDTH = 120
     
-    # 品质颜色映射 (RGB)
     QUALITY_COLORS = {
         "标准": (183, 186, 193),
         "非凡": (144, 198, 90),
@@ -76,25 +72,20 @@ class Config:
         "传奇": (248, 197, 68)
     }
     
-    # 超时设置
+    # 超时
     BITE_TIMEOUT = 60
     CAST_FAILURE_CHECK_SEC = 7
     BUCKET_FULL_WAIT_SEC = 60
     BUCKET_FULL_MAX_RETRIES = 5
 
-# 全局状态（线程安全）
+# 全局状态
 star_quality_count = {q: 0 for q in Config.QUALITY_COLORS.keys()}
 stats_lock = threading.Lock()
-
-# 全局控制标志
 fishing_paused = True
 pause_lock = threading.Lock()
-
-# 全局 GUI 窗口引用
 log_window = None
-log_window_lock = threading.Lock()
 
-# -------------------- 窗口与截图管理 --------------------
+# -------------------- 窗口管理 --------------------
 class WindowManager:
     def __init__(self):
         self.hwnd = None
@@ -112,7 +103,6 @@ class WindowManager:
         if not self.hwnd:
             return False
         
-        # 激活窗口
         try:
             window = gw.getWindowsWithTitle(Config.WINDOW_TITLES[0])[0]
             window.activate()
@@ -120,7 +110,6 @@ class WindowManager:
         except Exception:
             pass
         
-        # 获取客户区位置和大小
         try:
             win_left, win_top, win_right, win_bottom = win32gui.GetWindowRect(self.hwnd)
             client_width, client_height = win32gui.GetClientRect(self.hwnd)[2:]
@@ -137,21 +126,19 @@ class WindowManager:
             return False
     
     def capture(self, sct: mss.mss) -> np.ndarray:
-        """截图当前窗口内容，返回 BGR 格式 numpy 数组"""
         region = {"top": self.top, "left": self.left, "width": self.width, "height": self.height}
         img = sct.grab(region)
-        return np.array(img)[:, :, :3]  # 去掉 alpha 通道
+        return np.array(img)[:, :, :3]
 
 win_mgr = WindowManager()
 
-# -------------------- ROI 提取与图像处理 --------------------
+# -------------------- ROI 与图像处理 --------------------
 def extract_roi(frame: np.ndarray, rel_x: float, rel_y: float, rel_w: float, rel_h: float,
                 window_w: int, window_h: int) -> Optional[np.ndarray]:
     x = int(rel_x * window_w)
     y = int(rel_y * window_h)
     w = int(rel_w * window_w)
     h = int(rel_h * window_h)
-    
     if w <= 0 or h <= 0 or x + w > frame.shape[1] or y + h > frame.shape[0]:
         return None
     return frame[y:y+h, x:x+w]
@@ -161,10 +148,10 @@ def preprocess_binary(img: np.ndarray) -> np.ndarray:
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return binary
 
-# -------------------- 数字变化检测器（咬钩检测） --------------------
+# -------------------- 咬钩检测器 --------------------
 class NumberChangeTrigger:
     def __init__(self, rel_x: float, rel_y: float, w: int, h: int,
-                 threshold: float = 0.95, interval: float = 0.3):
+                 threshold: float = 0.90, interval: float = 0.3):
         self.rel_x = rel_x
         self.rel_y = rel_y
         self.w = w
@@ -188,27 +175,23 @@ class NumberChangeTrigger:
             return False, 1.0
         if self.base_binary is None:
             return False, 1.0
-        
         roi = extract_roi(frame, self.rel_x, self.rel_y, self.w/window_w, self.h/window_h,
                           window_w, window_h)
         if roi is None or roi.size == 0:
             return False, 1.0
-        
         current = preprocess_binary(roi)
         if current.shape != self.base_binary.shape:
             return False, 1.0
-        
         diff = cv2.absdiff(self.base_binary, current)
         diff_ratio = np.sum(diff > 0) / diff.size
         similarity = 1.0 - diff_ratio
-        
         if similarity < self.threshold:
             self.base_binary = current
             self.last_trigger_time = now
             return True, similarity
         return False, similarity
 
-# -------------------- F按钮变化检测器（鱼桶满） --------------------
+# -------------------- 鱼桶满检测器 --------------------
 class FButtonChangeTrigger:
     def __init__(self, rel_x: float, rel_y: float, rel_w: float, rel_h: float,
                  threshold: float = 0.85, min_consecutive: int = 2, interval: float = 0.2):
@@ -236,24 +219,19 @@ class FButtonChangeTrigger:
             return False, 1.0
         if self.base_binary is None:
             return False, 1.0
-        
         roi = extract_roi(frame, self.rel_x, self.rel_y, self.rel_w, self.rel_h, window_w, window_h)
         if roi is None or roi.size == 0:
             return False, 1.0
-        
         current = preprocess_binary(roi)
         if current.shape != self.base_binary.shape:
             return False, 1.0
-        
         diff = cv2.absdiff(self.base_binary, current)
         diff_ratio = np.sum(diff > 0) / diff.size
         similarity = 1.0 - diff_ratio
-        
         if similarity > self.threshold:
             self.consecutive_match += 1
         else:
             self.consecutive_match = 0
-        
         if self.consecutive_match >= self.min_consecutive:
             self.last_trigger_time = now
             return True, similarity
@@ -269,8 +247,9 @@ def get_pixel_color_abs(x: int, y: int) -> Tuple[int, int, int]:
 def is_color_in_range(base_rgb: Tuple[int, int, int], current_rgb: Tuple[int, int, int], tolerance: int = 12) -> bool:
     return all(abs(base - cur) <= tolerance for base, cur in zip(base_rgb, current_rgb))
 
-# 鼠标低级操作
+# 鼠标低级操作 (修复版)
 PUL = ctypes.POINTER(ctypes.c_ulong)
+
 class MOUSEINPUT(ctypes.Structure):
     _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long), ("mouseData", ctypes.c_ulong),
                 ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong), ("dwExtraInfo", PUL)]
@@ -298,7 +277,6 @@ def left_click():
 
 # -------------------- 品质检测 --------------------
 def detect_star_quality(frame: np.ndarray) -> Optional[str]:
-    """检测五角星品质，返回品质名称，并更新全局统计"""
     global star_quality_count
     try:
         h_img, w_img = frame.shape[:2]
@@ -332,12 +310,10 @@ def detect_star_quality(frame: np.ndarray) -> Optional[str]:
                 best_tw, best_th = t_resized.shape[1], t_resized.shape[0]
         
         if best_loc is None or best_score < 0.3:
-            logger.debug("未检测到五角星（匹配度不足）")
             return None
         
         top_left = (sx + best_loc[0], sy + best_loc[1])
-        bottom_right = (top_left[0] + best_tw, top_left[1] + best_th)
-        y1, y2 = top_left[1], bottom_right[1]
+        y1, y2 = top_left[1], top_left[1] + best_th
         x1 = top_left[0] + tw + Config.COLOR_REGION_OFFSET_X
         x2 = x1 + Config.COLOR_REGION_WIDTH
         color_region = frame[y1:y2, x1:x2]
@@ -361,7 +337,6 @@ def detect_star_quality(frame: np.ndarray) -> Optional[str]:
         if best_name:
             with stats_lock:
                 star_quality_count[best_name] += 1
-            # 更新 GUI 显示
             if log_window:
                 log_window.update_stats_display()
             return best_name
@@ -371,7 +346,7 @@ def detect_star_quality(frame: np.ndarray) -> Optional[str]:
         traceback.print_exc()
         return None
 
-# -------------------- 钓鱼流程核心函数 --------------------
+# -------------------- 钓鱼流程核心 --------------------
 def check_cast_success(frame: np.ndarray) -> bool:
     roi = extract_roi(frame, *Config.CAST_SUCCESS_REGION, win_mgr.width, win_mgr.height)
     if roi is None or roi.size == 0:
@@ -381,6 +356,9 @@ def check_cast_success(frame: np.ndarray) -> bool:
     return dist <= Config.CAST_COLOR_TOLERANCE
 
 def wait_for_bite(fishing_start_time: float) -> Tuple[bool, str]:
+    # 等待抛竿动画稳定，避免误判
+    time.sleep(0.8)
+    
     trigger = NumberChangeTrigger(
         Config.NUMBER_REGION[0], Config.NUMBER_REGION[1],
         Config.NUMBER_REGION[2], Config.NUMBER_REGION[3],
@@ -421,7 +399,6 @@ def wait_for_bite(fishing_start_time: float) -> Tuple[bool, str]:
         time.sleep(0.05)
 
 def reel_fish(fishing_start_time: float):
-    # 收杆检测点（原代码逻辑）
     check_x = int((0.5 * win_mgr.width) + win_mgr.left + 100 + 50 * (win_mgr.width // 1800))
     check_y = int((0.9478 * win_mgr.height) + win_mgr.top)
     base_color_orange = (255, 195, 83)
@@ -518,56 +495,52 @@ def auto_fish_once() -> str:
     time.sleep(1)
     return "success"
 
-# -------------------- GUI 日志窗口（无图片） --------------------
+# -------------------- 简洁 GUI 窗口 --------------------
 class LogWindow:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("🦊 Vicksy")
-        self.root.overrideredirect(True)
-        self.root.geometry("280x300")  # 高度减小，因为去掉了图片
+        self.root.title("Vicksy")          # 简单标题，不显眼
+        self.root.overrideredirect(True)   # 无标题栏
+        self.root.geometry("280x260")
         self.root.attributes("-topmost", True)
-        self.root.configure(bg='white')
-        self.root.wm_attributes("-transparentcolor", 'white')
+        self.root.configure(bg='#2b2b2b')  # 深色背景
+        self.root.wm_attributes("-transparentcolor", '#2b2b2b')  # 不透明，但窗口背景一致
         
         # 拖动
         self.root.bind("<ButtonPress-1>", self.start_move)
         self.root.bind("<B1-Motion>", self.do_move)
         
-        # 关闭按钮
+        # 关闭按钮（简洁）
         close_btn = tk.Button(self.root, text="×", command=self.on_close,
-                              bg='white', fg='red', font=("Arial", 16, "bold"),
+                              bg='#2b2b2b', fg='#aaaaaa', font=("Arial", 12, "bold"),
                               bd=0, highlightthickness=0, width=2)
         close_btn.place(relx=1.0, rely=0.0, anchor='ne')
         
-        # 没有图片，直接显示标题文字
-        title_label = tk.Label(self.root, text="🦊 狐狐钓鱼辅助", bg='white',
-                               fg='black', font=("微软雅黑", 12, "bold"))
-        title_label.pack(pady=8)
-        
-        # 日志文本框（保留最多10行）
-        self.log_text = tk.Text(self.root, bg='black', fg='yellow',
-                                font=("Segoe UI Mono", 9), height=6,
-                                wrap=tk.WORD, state=tk.DISABLED)
-        self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0,5))
+        # 日志文本框（深色，高对比）
+        self.log_text = tk.Text(self.root, bg='#1e1e1e', fg='#d4d4d4',
+                                font=("Consolas", 9), height=8,
+                                wrap=tk.WORD, state=tk.DISABLED,
+                                relief=tk.FLAT, padx=4, pady=2)
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=(20,5))
         
         # 统计栏
-        self.stats_text = tk.Text(self.root, bg='black', fg='yellow',
-                                  font=("Segoe UI Mono", 9), height=1,
+        self.stats_text = tk.Text(self.root, bg='#1e1e1e', fg='#d4d4d4',
+                                  font=("Consolas", 9), height=1,
                                   wrap=tk.NONE, state=tk.DISABLED,
-                                  relief=tk.FLAT, padx=5, pady=2)
-        self.stats_text.pack(fill=tk.X, padx=5, pady=(0,5))
+                                  relief=tk.FLAT, padx=4, pady=2)
+        self.stats_text.pack(fill=tk.X, padx=5, pady=(0,2))
         
         # 状态栏
-        self.status_text = tk.Text(self.root, bg='black', fg='yellow',
-                                   font=("微软雅黑", 9), height=1,
+        self.status_text = tk.Text(self.root, bg='#1e1e1e', fg='#d4d4d4',
+                                   font=("Consolas", 9), height=1,
                                    wrap=tk.NONE, state=tk.DISABLED,
-                                   relief=tk.FLAT, padx=5, pady=2)
+                                   relief=tk.FLAT, padx=4, pady=2)
         self.status_text.pack(fill=tk.X, padx=5, pady=(0,5))
         
-        # 配置 tags
-        self.status_text.tag_configure("paused", foreground="red")
-        self.status_text.tag_configure("running", foreground="green")
-        self.stats_text.tag_configure("total", foreground="yellow")
+        # 标签颜色
+        self.status_text.tag_configure("paused", foreground="#ff5555")
+        self.status_text.tag_configure("running", foreground="#55ff55")
+        self.stats_text.tag_configure("total", foreground="#ffff55")
         for q, color in Config.QUALITY_COLORS.items():
             self.stats_text.tag_configure(q, foreground=f"#{color[0]:02x}{color[1]:02x}{color[2]:02x}")
         
@@ -601,8 +574,9 @@ class LogWindow:
             msg = self.log_queue.get()
             self.log_text.config(state=tk.NORMAL)
             self.log_text.insert(tk.END, msg + "\n")
+            # 保留最多12行
             line_count = int(self.log_text.index('end-1c').split('.')[0])
-            while line_count > 10:
+            while line_count > 12:
                 self.log_text.delete(1.0, "2.0")
                 line_count -= 1
             self.log_text.config(state=tk.DISABLED)
@@ -631,13 +605,13 @@ class LogWindow:
         self.status_text.config(state=tk.NORMAL)
         self.status_text.delete(1.0, tk.END)
         self.status_text.insert(tk.END, indicator, tag)
-        self.status_text.insert(tk.END, " F1: 开关 | F2: 退出")
+        self.status_text.insert(tk.END, "  F1:开关  F2:退出")
         self.status_text.config(state=tk.DISABLED)
     
     def run(self):
         self.root.mainloop()
 
-# -------------------- 主程序入口 --------------------
+# -------------------- 主程序 --------------------
 def main():
     global fishing_paused, log_window
     
@@ -647,7 +621,7 @@ def main():
     
     log_window = LogWindow()
     
-    # 重定向 print 到日志窗口
+    # 重定向输出
     class PrintRedirector:
         def write(self, text):
             if text.strip():
@@ -660,11 +634,10 @@ def main():
     sys.stdout = PrintRedirector()
     sys.stderr = PrintRedirector()
     
-    logger.info("🦊 狐狐附身...")
-    logger.info("✅ 按 F1 开始/暂停自动钓鱼")
-    logger.info("请将窗口切回至猛兽派对...")
-    logger.info(f"游戏窗口分辨率: {win_mgr.width}x{win_mgr.height}")
-    logger.info("面朝小河，拿起鱼竿，准备好钓饵     按 F1 请🦊狐狐附身钓鱼")
+    logger.info("🦊 狐狐钓鱼辅助")
+    logger.info("✅ F1 开始/暂停 | F2 退出")
+    logger.info(f"窗口分辨率: {win_mgr.width}x{win_mgr.height}")
+    logger.info("面朝小河，拿起鱼竿，按 F1 启动")
     
     def toggle_fishing(e=None):
         global fishing_paused
@@ -679,7 +652,7 @@ def main():
     
     def exit_listener():
         keyboard.wait('f2')
-        logger.info("F2 按下，程序退出")
+        logger.info("F2 按下，退出")
         os._exit(0)
     threading.Thread(target=exit_listener, daemon=True).start()
     
@@ -698,7 +671,7 @@ def main():
                 if bucket_full_retry >= Config.BUCKET_FULL_MAX_RETRIES:
                     logger.info("多次检测到鱼桶满，程序停止")
                     break
-                logger.info(f"鱼桶满检测次数: {bucket_full_retry}/{Config.BUCKET_FULL_MAX_RETRIES}")
+                logger.info(f"鱼桶满次数: {bucket_full_retry}/{Config.BUCKET_FULL_MAX_RETRIES}")
             else:
                 bucket_full_retry = 0
             time.sleep(0.5)
